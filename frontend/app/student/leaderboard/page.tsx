@@ -13,16 +13,34 @@ export default function Leaderboard() {
   const quizId = searchParams.get('id');
   const [board, setBoard] = useState<LeaderboardEntry[]>([]);
 
+//   useEffect(() => {
+//     const s = io('http://localhost:5000');
+//     s.emit('join_room', { quizId });
+
+//     s.on('leaderboard_updated', (data: LeaderboardEntry[]) => {
+//       setBoard(data);
+//     });
+
+//     return () => { s.disconnect(); };
+//   }, [quizId]);
+
   useEffect(() => {
-    const s = io('http://localhost:5000');
-    s.emit('join_room', { quizId });
+  if (!quizId) return;
 
-    s.on('leaderboard_updated', (data: LeaderboardEntry[]) => {
-      setBoard(data);
-    });
+  const s = io('http://localhost:5000');
+  
+  // Join the channel room
+  s.emit('join_room', { quizId });
 
-    return () => { s.disconnect(); };
-  }, [quizId]);
+  // CRITICAL: Ask the backend server to compute and send current scores immediately
+  s.emit('get_leaderboard', { quizId });
+
+  s.on('leaderboard_updated', (data: LeaderboardEntry[]) => {
+    setBoard(data);
+  });
+
+  return () => { s.disconnect(); };
+}, [quizId]);
 
   return (
     <div className="p-8 max-w-md mx-auto">

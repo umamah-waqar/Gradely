@@ -18,34 +18,39 @@ export default function TeacherDashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
 
-  useEffect(() => {
-    const userData = JSON.parse(localStorage.getItem('user') || '{}');
-    setUser(userData);
-    const token = localStorage.getItem('token');
-    
-    fetch('http://localhost:5000/api/quizzes/teacher', {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-    .then(res => res.json())
-    .then(data => setQuizzes(data));
+useEffect(() => {
+  const userData = JSON.parse(localStorage.getItem('user') || '{}');
+  setUser(userData);
+  const token = localStorage.getItem('token');
+  
+  fetch('http://localhost:5000/api/quizzes/teacher', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+  .then(res => res.json())
+  .then(data => setQuizzes(data));
 
-    const s = io('http://localhost:5000');
-    setSocket(s);
-    return () => { s.disconnect(); };
-  }, []);
+  const s = io('http://localhost:5000');
+  setSocket(s);
+
+  // ADD THIS LINE: When the dashboard loads, let the socket connection establish
+  return () => { s.disconnect(); };
+}, []);
 
   const startQuiz = (quizId: string) => {
-    if (socket && user) {
-      socket.emit('start_quiz', { quizId, tenantId: user.tenantId });
-      alert('Quiz Active!');
-    }
-  };
+  if (socket && user) {
+    // Teacher registers into the socket channel room before firing the trigger
+    socket.emit('join_room', { quizId }); 
+    socket.emit('start_quiz', { quizId, tenantId: user.tenantId });
+    alert('Quiz Room Initialized & Broadcasted!');
+  }
+};
 
   const nextQuestion = (quizId: string) => {
-    if (socket && user) {
-      socket.emit('next_question', { quizId, tenantId: user.tenantId });
-    }
-  };
+  if (socket && user) {
+    socket.emit('join_room', { quizId }); // Safeguard room presence
+    socket.emit('next_question', { quizId, tenantId: user.tenantId });
+  }
+};
 
   return (
     <div className="p-8 max-w-4xl mx-auto">

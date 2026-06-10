@@ -85,19 +85,57 @@ io.on('connection', (socket) => {
     io.to(quizId).emit('quiz_started', { question: quiz.questions[0], index: 0 });
   });
 
-  socket.on('next_question', async ({ quizId, tenantId }) => {
+  // socket.on('next_question', async ({ quizId, tenantId }) => {
+  //   const quiz = await Quiz.findOne({ _id: quizId, tenantId });
+  //   const nextIndex = quiz.currentQuestionIndex + 1;
+  //   if (nextIndex < quiz.questions.length) {
+  //     quiz.currentQuestionIndex = nextIndex;
+  //     await quiz.save();
+  //     io.to(quizId).emit('next_question', { question: quiz.questions[nextIndex], index: nextIndex });
+  //   } else {
+  //     quiz.status = 'ended';
+  //     await quiz.save();
+  //     io.to(quizId).emit('quiz_ended');
+  //   }
+  // });
+
+  // REPLACE THE EXISTING 'next_question' BLOCK IN backend/server.js WITH THIS:
+socket.on('next_question', async ({ quizId, tenantId }) => {
+  try {
+    // 1. Find the quiz and ensure tenant matching is enforced
     const quiz = await Quiz.findOne({ _id: quizId, tenantId });
+    
+    if (!quiz) {
+      console.error(`Next Question Error: Quiz not found for ID ${quizId} and Tenant ${tenantId}`);
+      return;
+    }
+
     const nextIndex = quiz.currentQuestionIndex + 1;
+
+    // 2. Check if we actually have a next question left
     if (nextIndex < quiz.questions.length) {
       quiz.currentQuestionIndex = nextIndex;
       await quiz.save();
-      io.to(quizId).emit('next_question', { question: quiz.questions[nextIndex], index: nextIndex });
+
+      console.log(`Advancing Quiz ${quizId} to Question Index ${nextIndex}`);
+
+      // 3. CRITICAL: Use io.to() to ensure it broadcasts to ALL sockets in the room
+      io.to(quizId).emit('next_question', { 
+        question: quiz.questions[nextIndex], 
+        index: nextIndex 
+      });
     } else {
+      // No questions left, transition to end state
       quiz.status = 'ended';
       await quiz.save();
+      
+      console.log(`Quiz ${quizId} has reached the end.`);
       io.to(quizId).emit('quiz_ended');
     }
-  });
+  } catch (err) {
+    console.error('Socket next_question system crash:', err);
+  }
+});
 
   socket.on('submit_answer', async (data) => {
     await producer.send({
@@ -114,6 +152,27 @@ io.on('connection', (socket) => {
       io.to(data.quizId).emit('leaderboard_updated', leaderboard);
     }, 500); 
   });
+
+  socket.on('get_leaderboard', async ({ quizId }) => {
+  try {
+    // 1. Pull the sorted set out of Redis container memory
+    const rawLeaderboard = await redisClient.zRangeWithScores(`quiz:${quizId}`, 0, -1, { REV: true });
+    
+    // 2. Map the cached keys back to the real user names matching their MongoDB profiles
+    const leaderboard = await Promise.all(rawLeaderboard.map(async (item) => {
+      const user = await User.findById(item.value);
+      return { 
+        name: user ? user.name : 'Anonymous Student', 
+        score: item.score 
+      };
+    }));
+
+    // 3. Send back explicitly to the single requesting client socket
+    socket.emit('leaderboard_updated', leaderboard);
+  } catch (err) {
+    console.error('Failed on-demand leaderboard generation:', err);
+  }
+});
 });
 
 const PORT = process.env.PORT || 5000;

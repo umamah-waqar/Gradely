@@ -59,18 +59,21 @@ export default function QuizScreen() {
   }, [quizId, router]);
 
   const submitChoice = (opt: string) => {
-    if (hasSubmitted || !socket || !user || !currentQuestion) return;
-    setSelectedOpt(opt);
-    setHasSubmitted(true);
+  if (hasSubmitted || !socket || !user || !currentQuestion) return;
+  setSelectedOpt(opt);
+  setHasSubmitted(true);
 
-    socket.emit('submit_answer', {
-      tenantId: user.tenantId,
-      quizId,
-      studentId: user.email, 
-      questionId: currentQuestion._id,
-      selectedAnswer: opt
-    });
-  };
+  // Parse local storage safely to grab the true database _id string
+  const completeUser = JSON.parse(localStorage.getItem('user') || '{}');
+
+  socket.emit('submit_answer', {
+    tenantId: user.tenantId,
+    quizId,
+    studentId: completeUser.id || completeUser._id, // CRITICAL: Use the DB document Object ID string, not the email!
+    questionId: currentQuestion._id,
+    selectedAnswer: opt
+  });
+};
 
   return (
     <div className="p-8 max-w-xl mx-auto min-h-screen flex flex-col justify-center">
