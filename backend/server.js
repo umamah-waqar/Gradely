@@ -76,11 +76,12 @@ app.get('/api/quizzes/join/:code', authMiddleware, async (req, res) => {
   res.json(quiz);
 });
 
+// PURE LIVE TELEMETRY ENGINE VIA REDIS
 const broadcastLeaderboard = async (quizId) => {
   try {
     console.log(`Compiling clean Redis cache live telemetry matrices for quiz: ${quizId}`);
     
-    // 1. Fetch raw sorted set data maps back out of your container memory
+    // Fetch raw sorted set data maps back out of your container memory
     const rawLeaderboard = await redisClient.zRangeWithScores(`quiz:${quizId}`, 0, -1, { REV: true });
     
     if (!rawLeaderboard || rawLeaderboard.length === 0) {
@@ -89,7 +90,7 @@ const broadcastLeaderboard = async (quizId) => {
       return;
     }
 
-    // 2. Hydrate user documents from the DB first without messing with index positions yet
+    // Hydrate user documents from the DB first without messing with index positions yet
     const rawPlayers = await Promise.all(rawLeaderboard.map(async (item) => {
       try {
         const cleanUserId = String(item.value).trim().replace(/^["']|["']$/g, '');
@@ -104,7 +105,7 @@ const broadcastLeaderboard = async (quizId) => {
         return {
           id: cleanUserId,
           name: user.name,
-          score: item.score
+          score: parseInt(item.score, 10) // Force score to be an integer
         };
       } catch (err) {
         console.error("Error processing user row entry:", err);
@@ -112,10 +113,13 @@ const broadcastLeaderboard = async (quizId) => {
       }
     }));
 
-    // 3. Clear out null entries so we are left with a dense array of active real participants
+    // Clear out null entries so we are left with a dense array of active real participants
     const filteredPlayers = rawPlayers.filter(player => player !== null);
 
-    // 4. CRITICAL FIX: Loop over the cleaned array to distribute positions and medals safely
+    // Sort players explicitly by score descending to prevent any Redis sequence issues
+    filteredPlayers.sort((a, b) => b.score - a.score);
+
+    // Map medals and positions dynamically onto the sorted array
     const cleanedLeaderboard = filteredPlayers.map((player, trueIdx) => {
       let medal = "";
       if (trueIdx === 0) medal = "🥇";
@@ -128,7 +132,7 @@ const broadcastLeaderboard = async (quizId) => {
         medal: medal
       };
     });
-
+    
     console.log(`Successfully broadcasted ${cleanedLeaderboard.length} student scores from Redis.`);
     io.to(quizId).emit('leaderboard_updated', cleanedLeaderboard);
 
@@ -145,9 +149,26 @@ io.on('connection', (socket) => {
     socket.join(quizId);
   });
 
+  // FIXED: Clears old data when the teacher starts a fresh quiz execution run
   socket.on('start_quiz', async ({ quizId, tenantId }) => {
     try {
-      const quiz = await Quiz.findOneAndUpdate({ _id: quizId, tenantId }, { status: 'active', currentQuestionIndex: 0 }, { new: true });
+      console.log(`🧹 FLUSHING PREVIOUS REAL-TIME RESULTS FOR QUIZ: ${quizId}`);
+      
+      // 1. Completely remove the old Redis sorted set data key
+      await redisClient.del(`quiz:${quizId}`);
+
+      // 2. Clear old MongoDB fallback submissions for this specific execution session
+      await Submission.deleteMany({ quizId: new mongoose.Types.ObjectId(quizId) });
+
+      // 3. Set the quiz state to active and broadcast the first question
+      const quiz = await Quiz.findOneAndUpdate(
+        { _id: quizId, tenantId }, 
+        { status: 'active', currentQuestionIndex: 0 }, 
+        { new: true }
+      );
+
+      // Force-emit an empty leaderboard array right away to clear the screens of old entries
+      io.to(quizId).emit('leaderboard_updated', []);
       io.to(quizId).emit('quiz_started', { question: quiz.questions[0], index: 0 });
     } catch (err) {
       console.error("Start Quiz error:", err);
@@ -188,50 +209,64 @@ io.on('connection', (socket) => {
 
   socket.on('submit_answer', async (data) => {
     try {
-      // 1. Stream the payload directly to Kafka broker topic log
+      console.log("Inbound Answer Data Ingestion Payload:", data);
+
+      // 1. Stream raw payload directly to Kafka broker topic log
       await producer.send({
         topic: 'quiz-submissions',
         messages: [{ value: JSON.stringify(data) }]
       }).catch(e => console.log("Kafka broker offline notification (Bypassing direct hook):", e.message));
 
-      // 2. IMMEDIATE WRITE LOGIC: Process evaluations locally instantly
       const { tenantId, quizId, studentId, questionId, selectedAnswer } = data;
       
-      const quiz = await Quiz.findOne({ _id: quizId, tenantId });
+      // Clean up inputs and cast them cleanly
+      const cleanStudentIdStr = String(studentId).trim().replace(/^["']|["']$/g, '');
+      const cleanQuizIdStr = String(quizId).trim().replace(/^["']|["']$/g, '');
+      const cleanQuestionIdStr = String(questionId).trim().replace(/^["']|["']$/g, '');
+
+      const quiz = await Quiz.findById(cleanQuizIdStr);
       if (quiz) {
-        const question = quiz.questions.id(questionId);
+        // DEFENSIVE LOOKUP: Find the question by iterating the array manually to prevent Mongoose .id() bugs
+        const question = quiz.questions.find(q => q._id.toString() === cleanQuestionIdStr);
+        
         if (question) {
           const isCorrect = question.correctAnswer === selectedAnswer;
           const points = isCorrect ? 10 : 0;
+          
+          console.log(`Evaluating Choice: Corect Answer is [${question.correctAnswer}], Selected was [${selectedAnswer}]. Points: ${points}`);
 
-          let submission = await Submission.findOne({ quizId, studentId, tenantId });
+          let submission = await Submission.findOne({ quizId: cleanQuizIdStr, studentId: cleanStudentIdStr, tenantId });
           if (!submission) {
-            submission = new Submission({ tenantId, quizId, studentId, answers: [], score: 0 });
+            submission = new Submission({ tenantId, quizId: cleanQuizIdStr, studentId: cleanStudentIdStr, answers: [], score: 0 });
           }
 
-          const alreadyAnswered = submission.answers.some(a => a.questionId.toString() === questionId.toString());
+          const alreadyAnswered = submission.answers.some(a => a.questionId.toString() === cleanQuestionIdStr);
           if (!alreadyAnswered) {
-            submission.answers.push({ questionId, selectedAnswer, isCorrect });
+            submission.answers.push({ questionId: cleanQuestionIdStr, selectedAnswer, isCorrect });
             if (isCorrect) submission.score += points;
             await submission.save();
             
-            // HYBRID SYNC: Force clean string mapping into the Redis container memory set
-            const cleanStudentIdStr = String(studentId).trim().replace(/^["']|["']$/g, '');
-            console.log(`Writing to Redis -> Key: quiz:${quizId}, Student: ${cleanStudentIdStr}, Points: ${points}`);
+            console.log(`🔥 SUCCESS: Writing to Redis Set -> quiz:${cleanQuizIdStr} | Student: ${cleanStudentIdStr} | Points added: ${points}`);
             
-            await redisClient.zIncrBy(`quiz:${quizId}`, points, cleanStudentIdStr);
+            // Push directly to live Redis sorted set cache
+            await redisClient.zIncrBy(`quiz:${cleanQuizIdStr}`, points, cleanStudentIdStr);
+          } else {
+            console.log(`⚠️ Answer rejected: Student ${cleanStudentIdStr} already completed this question block.`);
           }
+        } else {
+          console.error(`❌ Evaluation Error: Question ID ${cleanQuestionIdStr} not found inside Quiz dataset questions array.`);
         }
+      } else {
+        console.error(`❌ Evaluation Error: Quiz ID ${cleanQuizIdStr} not found in MongoDB.`);
       }
 
-      // 3. Fire computed data down the WebSocket line room pipe
-      await broadcastLeaderboard(data.quizId);
+      // Fire computed data down the WebSocket line room pipe
+      await broadcastLeaderboard(cleanQuizIdStr);
 
     } catch (error) {
       console.error("Direct real-time answer ingestion crash:", error);
     }
   });
-
   // TARGETED LEADERBOARD ROOM DEMAND INTERCEPT HOOK
   socket.on('get_leaderboard', async ({ quizId }) => {
     await broadcastLeaderboard(quizId);
