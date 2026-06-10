@@ -12,6 +12,8 @@ interface Question {
 interface User {
   tenantId: string;
   email: string;
+  id?: string;
+  _id?: string;
 }
 
 export default function QuizScreen() {
@@ -59,21 +61,29 @@ export default function QuizScreen() {
   }, [quizId, router]);
 
   const submitChoice = (opt: string) => {
-  if (hasSubmitted || !socket || !user || !currentQuestion) return;
-  setSelectedOpt(opt);
-  setHasSubmitted(true);
+    if (hasSubmitted || !socket || !currentQuestion) return;
+    
+    // Parse local storage safely to grab user context identities
+    const completeUser = JSON.parse(localStorage.getItem('user') || '{}');
+    const studentId = completeUser.id || completeUser._id || user?.id || user?._id;
+    const tenantId = completeUser.tenantId || user?.tenantId;
 
-  // Parse local storage safely to grab the true database _id string
-  const completeUser = JSON.parse(localStorage.getItem('user') || '{}');
+    if (!studentId || !tenantId) {
+      console.error("Identity Matrix Sync Error: Tenant context or User tracking ID is unresolved.");
+      return;
+    }
 
-  socket.emit('submit_answer', {
-    tenantId: user.tenantId,
-    quizId,
-    studentId: completeUser.id || completeUser._id, // CRITICAL: Use the DB document Object ID string, not the email!
-    questionId: currentQuestion._id,
-    selectedAnswer: opt
-  });
-};
+    setSelectedOpt(opt);
+    setHasSubmitted(true);
+
+    socket.emit('submit_answer', {
+      tenantId,
+      quizId,
+      studentId, 
+      questionId: currentQuestion._id,
+      selectedAnswer: opt
+    });
+  };
 
   return (
     <div className="p-8 max-w-xl mx-auto min-h-screen flex flex-col justify-center">
@@ -83,19 +93,31 @@ export default function QuizScreen() {
         <div className="bg-white p-6 rounded-lg shadow-lg border">
           <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">Question #{currentIndex + 1}</span>
           <h2 className="text-2xl font-bold mt-2 mb-6">{currentQuestion?.questionText}</h2>
+          
           <div className="space-y-3">
             {currentQuestion?.options.map((opt, i) => (
               <button 
                 key={i} 
                 disabled={hasSubmitted} 
                 onClick={() => submitChoice(opt)}
-                className={`w-full text-left p-3 border rounded transition font-medium ${selectedOpt === opt ? 'bg-indigo-600 text-white' : 'bg-gray-50 hover:bg-gray-100'}`}
+                className={`w-full text-left p-3 border rounded transition font-medium ${
+                  selectedOpt === opt 
+                    ? 'bg-indigo-600 text-white border-indigo-600' 
+                    : 'bg-gray-50 hover:bg-gray-100 border-gray-200 disabled:opacity-60'
+                }`}
               >
                 {opt}
               </button>
             ))}
           </div>
-          {hasSubmitted && <p className="text-sm text-green-600 font-semibold mt-4 text-center">Answer transmitted to stream ingestion engine node.</p>}
+          
+          {hasSubmitted && (
+            <div className="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded-md">
+              <p className="text-sm text-emerald-700 font-semibold text-center">
+                ✓ Answer transmitted to stream ingestion engine node.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>
