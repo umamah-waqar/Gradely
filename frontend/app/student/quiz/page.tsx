@@ -61,30 +61,37 @@ export default function QuizScreen() {
   }, [quizId, router]);
 
   const submitChoice = (opt: string) => {
-    if (hasSubmitted || !socket || !currentQuestion) return;
-    
-    // Parse local storage safely to grab user context identities
-    const completeUser = JSON.parse(localStorage.getItem('user') || '{}');
-    const studentId = completeUser.id || completeUser._id || user?.id || user?._id;
-    const tenantId = completeUser.tenantId || user?.tenantId;
+  if (hasSubmitted || !socket || !currentQuestion) return;
+  
+  
+  // 1. Parse local storage safely to grab user context identities
+  const completeUser = JSON.parse(localStorage.getItem('user') || '{}');
+  
+  // Prioritize the raw ID token keys explicitly
+  const rawId = completeUser.id || completeUser._id || completeUser.user?.id || completeUser.user?._id;
+  const tenantId = completeUser.tenantId || completeUser.user?.tenantId;
 
-    if (!studentId || !tenantId) {
-      console.error("Identity Matrix Sync Error: Tenant context or User tracking ID is unresolved.");
-      return;
-    }
+  // CRITICAL PROTECTION FILTER: Prevent "undefined" literal data bleeding
+  if (!rawId || rawId === 'undefined') {
+    alert("Identity Sync Failure: Your student ID session is unrecognized. Please log out and back in.");
+    console.error("Payload Blocked: studentId is undefined or missing.");
+    return;
+  }
 
-    setSelectedOpt(opt);
-    setHasSubmitted(true);
+  const studentId = String(rawId).trim();
+  setSelectedOpt(opt);
+  setHasSubmitted(true);
 
-    socket.emit('submit_answer', {
-      tenantId,
-      quizId,
-      studentId, 
-      questionId: currentQuestion._id,
-      selectedAnswer: opt
-    });
-  };
+  console.log(`Transmitting Answer Payload -> Student: ${studentId}, Choice: ${opt}`);
 
+  socket.emit('submit_answer', {
+    tenantId,
+    quizId,
+    studentId, 
+    questionId: currentQuestion._id,
+    selectedAnswer: opt
+  });
+};
   return (
     <div className="p-8 max-w-xl mx-auto min-h-screen flex flex-col justify-center">
       {currentIndex === -1 ? (
